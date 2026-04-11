@@ -6,7 +6,10 @@ import torch
 from areal.api import TrainEngine
 from areal.api.cli_args import MicroBatchSpec, PPOActorConfig
 from areal.infra import TrainController
-from areal.trainer.ppo.stats import infer_token_denominator
+from areal.trainer.ppo.stats import (
+    infer_token_denominator,
+    log_conditional_entropy_stats,
+)
 from areal.utils import logging, stats_tracker
 from areal.utils.constants import (
     PROX_APPROX_METHOD_LINEAR,
@@ -242,6 +245,7 @@ class PPOActor:
     @trace_perf("ppo_actor.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_actor")
     def ppo_update(self, data: list[dict[str, Any]]) -> None:
+        log_conditional_entropy_stats(data)
         batched_call(self._ppo_update, data, unpack=False)
 
     def _ppo_update(self, data: dict[str, Any]) -> None:

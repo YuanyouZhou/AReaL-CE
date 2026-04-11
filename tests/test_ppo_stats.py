@@ -1,10 +1,15 @@
+import math
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from areal.trainer.ppo.actor import grpo_loss_fn
 from areal.trainer.ppo.critic import ppo_loss_fn
-from areal.trainer.ppo.stats import infer_token_denominator
+from areal.trainer.ppo.stats import (
+    infer_token_denominator,
+    log_conditional_entropy_stats,
+)
 from areal.utils.stats_tracker import DistributedStatsTracker
 
 
@@ -137,3 +142,45 @@ def test_grpo_loss_fn_uses_packed_denominator_for_tree_vocab_stats():
 
     stats = tracker.export(reset=True)
     assert "n_tokens" in stats
+
+
+def test_log_conditional_entropy_stats_estimates_true_and_false_ce():
+    tracker = DistributedStatsTracker()
+    trajectory_groups = [
+        {
+            "rewards": torch.tensor([1.0, 0.0, 1.0]),
+            "logprobs": torch.tensor(
+                [
+                    [-1.0, -1.0],
+                    [-1.0, 0.0],
+                    [-2.0, -2.0],
+                ]
+            ),
+            "loss_mask": torch.ones(3, 2, dtype=torch.bool),
+        },
+        {
+            "rewards": torch.tensor([0.0, 0.0]),
+            "logprobs": torch.tensor(
+                [
+                    [-1.0, 0.0],
+                    [-1.0, -2.0],
+                ]
+            ),
+            "loss_mask": torch.ones(2, 2, dtype=torch.bool),
+        },
+    ]
+
+    log_conditional_entropy_stats(trajectory_groups, tracker=tracker)
+
+    stats = tracker.export(reset=True)
+    expected_true = (math.log(2 / 3) + 3.0 + 0.0) / 2
+    expected_false = (math.log(1 / 3) + 1.0 + 2.0) / 2
+    expected_success_rate = (2 / 3) / 2
+    assert stats["conditional_entropy_n_prompts"] == 2.0
+    assert stats["true_conditional_entropy_valid_prompts"] == 1.0
+    assert stats["false_conditional_entropy_valid_prompts"] == 2.0
+    assert stats["true_conditional_entropy/avg"] == pytest.approx(expected_true)
+    assert stats["false_conditional_entropy/avg"] == pytest.approx(expected_false)
+    assert stats["conditional_entropy_success_rate/avg"] == pytest.approx(
+        expected_success_rate
+    )
