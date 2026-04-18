@@ -1364,6 +1364,7 @@ class Normalization:
     Supports independent specification of normalization level for mean and std:
     - "batch": normalize across entire batch (with optional all_reduce in distributed setting)
     - "group": normalize within fixed-size groups
+    - "maxrl": apply MaxRL reward scaling within fixed-size rollout groups
     - None: no centering or no std scaling
     """
 
@@ -1389,6 +1390,9 @@ class Normalization:
         # Early return if no elements are active (all masked out)
         if loss_mask is not None and loss_mask.sum().item() == 0:
             return x.float()
+
+        if self.mean_level == "maxrl":
+            return self._apply_maxrl(x, loss_mask, high_precision=high_precision)
 
         # Step 1: Compute mean
         if self.mean_level == "batch":
@@ -1476,6 +1480,53 @@ class Normalization:
 
         # Normalize
         return (x_centered / (std + eps)).float()
+
+    def _apply_maxrl(
+        self,
+        x: torch.Tensor,
+        loss_mask: torch.Tensor | None,
+        high_precision: bool,
+    ) -> torch.Tensor:
+        """Apply MaxRL scaling: A_i = r_i * N / K - 1 per rollout group."""
+        dtype = torch.float64 if high_precision else torch.float32
+        xx = x.to(dtype)
+        mask = loss_mask.to(dtype) if loss_mask is not None else None
+        out = torch.empty_like(xx)
+        bs = xx.size(0)
+
+        for start in range(0, bs, self.group_size):
+            end = min(start + self.group_size, bs)
+            group = xx[start:end]
+            group_mask = mask[start:end] if mask is not None else None
+            seq_scores = self._sequence_means(group, group_mask)
+            group_mean = seq_scores.mean()
+            k = (seq_scores >= group_mean).sum().clamp(min=1).to(dtype)
+            scale = torch.tensor(
+                end - start,
+                dtype=dtype,
+                device=xx.device,
+            ) / k
+            out[start:end] = group * scale - 1.0
+
+        if mask is not None:
+            out = torch.where(mask > 0, out, torch.zeros_like(out))
+        return out.float()
+
+    @staticmethod
+    def _sequence_means(
+        x: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if x.ndim == 1:
+            return x
+
+        dims = tuple(range(1, x.ndim))
+        if mask is None:
+            return x.mean(dim=dims)
+
+        masked_sum = (x * mask).sum(dim=dims)
+        counts = mask.sum(dim=dims).clamp(min=1.0)
+        return masked_sum / counts
 
     @staticmethod
     def _compute_mean(

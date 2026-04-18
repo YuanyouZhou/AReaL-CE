@@ -43,8 +43,8 @@ class NormConfig:
     mean_level: str | None = field(
         default="batch",
         metadata={
-            "help": "Mean level for normalization. None for no mean normalization.",
-            "choices": ["batch", "group", None],
+            "help": "Mean level for normalization. Use 'maxrl' for MaxRL reward scaling. None for no mean normalization.",
+            "choices": ["batch", "group", "maxrl", None],
         },
     )
     mean_leave1out: bool = field(
@@ -76,20 +76,21 @@ class NormConfig:
 
     def __post_init__(self):
         """Validate normalization configuration."""
-        valid_levels = {"batch", "group", None}
-        if self.mean_level not in valid_levels:
+        valid_mean_levels = {"batch", "group", "maxrl", None}
+        valid_std_levels = {"batch", "group", None}
+        if self.mean_level not in valid_mean_levels:
             raise ValueError(
-                f"mean_level must be 'batch', 'group' or None, got {self.mean_level}"
+                f"mean_level must be 'batch', 'group', 'maxrl' or None, got {self.mean_level}"
             )
-        if self.std_level not in valid_levels:
+        if self.std_level not in valid_std_levels:
             raise ValueError(
                 f"std_level must be 'batch', 'group', or None, got {self.std_level}"
             )
         if (
-            self.mean_level == "group" or self.std_level == "group"
+            self.mean_level in {"group", "maxrl"} or self.std_level == "group"
         ) and self.group_size < 1:
             raise ValueError(
-                f"group_size must be a positive integer when using group normalization, got {self.group_size}"
+                f"group_size must be a positive integer when using group or MaxRL normalization, got {self.group_size}"
             )
 
 
