@@ -19,3 +19,8 @@ def const_minus_one_rw(
     prompt, completions, prompt_ids, completion_ids, answer, **kwargs
 ) -> float:
     return -1.0
+
+def const_one_rw(
+    prompt, completions, prompt_ids, completion_ids, answer, **kwargs
+) -> float:
+    return 1.0
