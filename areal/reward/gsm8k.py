@@ -14,3 +14,8 @@ def gsm8k_reward_fn(
     except Exception:
         logger.warning("Exception in gsm8k_reward_fn", exc_info=True)
         return 0.0
+
+def const_minus_one_rw(
+    prompt, completions, prompt_ids, completion_ids, answer, **kwargs
+) -> float:
+    return -1.0
