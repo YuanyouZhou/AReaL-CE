@@ -38,6 +38,58 @@ def infer_token_denominator(
     return torch.ones_like(fallback, **common_kwargs)
 
 
+def sequence_entropy_stat(
+    entropy: torch.Tensor,
+    loss_mask: torch.Tensor,
+    input_data: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Aggregate token entropy to per-sequence entropy for stats logging.
+
+    The returned value is the sum of valid-token entropy within each sequence.
+    Averaging it with the returned denominator gives a sequence-level average
+    rather than a token-level average.
+    """
+    loss_mask = loss_mask.bool()
+    if entropy.shape != loss_mask.shape:
+        raise ValueError(
+            "`entropy` and `loss_mask` must have the same shape for logging: "
+            f"{entropy.shape} vs {loss_mask.shape}"
+        )
+
+    masked_entropy = torch.where(loss_mask, entropy.float(), 0.0)
+
+    if entropy.ndim >= 2:
+        reduce_dims = tuple(range(1, entropy.ndim))
+        seq_entropy = masked_entropy.sum(dim=reduce_dims)
+        seq_denominator = loss_mask.any(dim=reduce_dims)
+        return seq_entropy, seq_denominator
+
+    cu_seqlens = input_data.get("cu_seqlens")
+    if (
+        isinstance(cu_seqlens, torch.Tensor)
+        and cu_seqlens.ndim == 1
+        and cu_seqlens.numel() >= 2
+        and int(cu_seqlens[-1].item()) == entropy.numel()
+    ):
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(
+            device=entropy.device, dtype=torch.long
+        )
+        seq_idx = torch.repeat_interleave(
+            torch.arange(lengths.numel(), device=entropy.device),
+            lengths,
+        )
+        seq_entropy = entropy.new_zeros(lengths.numel(), dtype=torch.float32)
+        seq_entropy.scatter_add_(0, seq_idx, masked_entropy.float())
+        valid_token_counts = torch.zeros(
+            lengths.numel(), dtype=torch.long, device=entropy.device
+        )
+        valid_token_counts.scatter_add_(0, seq_idx, loss_mask.long())
+        seq_denominator = valid_token_counts > 0
+        return seq_entropy, seq_denominator
+
+    return masked_entropy.sum().reshape(1), loss_mask.any().reshape(1)
+
+
 def log_conditional_entropy_stats(
     trajectory_groups: list[dict[str, Any]],
     tracker: stats_tracker.DistributedStatsTracker | None = None,

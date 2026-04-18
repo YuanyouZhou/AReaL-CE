@@ -9,6 +9,7 @@ from areal.infra import TrainController
 from areal.trainer.ppo.stats import (
     infer_token_denominator,
     log_conditional_entropy_stats,
+    sequence_entropy_stat,
 )
 from areal.utils import logging, stats_tracker
 from areal.utils.constants import (
@@ -483,10 +484,17 @@ def grpo_loss_fn(
 
             rkl_stat = rkl_penalty_per_token
 
+    seq_entropy, seq_entropy_denominator = sequence_entropy_stat(
+        entropy=entropy,
+        loss_mask=loss_mask,
+        input_data=input_data,
+    )
+
     # Log training statistics
     stats_tracker.denominator(
         n_tokens=infer_token_denominator(input_data, loss_mask),
         n_valid_tokens=loss_mask.bool(),
+        n_entropy_seqs=seq_entropy_denominator,
         clipped_tokens=stat["clip_mask"],
         dual_clipped_tokens=stat["dual_clip_mask"],
     )
@@ -502,11 +510,14 @@ def grpo_loss_fn(
         approx_kl=stat["approx_kl"],
         new_logp=logprobs.detach(),
         old_logp=old_logp,
-        entropy=entropy.float(),
         actor_loss=stat["loss"],
         clip_ratio=stat["clip_mask"].float(),
         dual_clip_ratio=stat["dual_clip_mask"].float(),
         denominator="n_valid_tokens",
+    )
+    stats_tracker.stat(
+        entropy=seq_entropy,
+        denominator="n_entropy_seqs",
     )
     if "behave_imp_weight" in stat:
         stats_tracker.denominator(unclipped_behave_tokens=stat["behave_mask"])
