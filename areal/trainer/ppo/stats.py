@@ -169,6 +169,8 @@ def log_conditional_entropy_stats(
     false_ce_tensor = torch.stack([x.to(device) for x in false_ce_values]).float()
     success_rate_tensor = torch.stack([x.to(device) for x in success_rates]).float()
     prompt_denominator = torch.ones_like(true_ce_tensor, dtype=torch.bool)
+    true_ce_nonzero = true_ce_tensor != 0
+    false_ce_nonzero = false_ce_tensor != 0
 
     tracker.denominator(
         conditional_entropy_n_prompts=prompt_denominator,
@@ -178,10 +180,18 @@ def log_conditional_entropy_stats(
         false_conditional_entropy_valid_prompts=torch.stack(
             [x.to(device) for x in false_valid]
         ).bool(),
+        true_conditional_entropy_nonzero_prompts=true_ce_nonzero,
+        false_conditional_entropy_nonzero_prompts=false_ce_nonzero,
     )
     tracker.stat(
         true_conditional_entropy=true_ce_tensor,
+        denominator="true_conditional_entropy_nonzero_prompts",
+    )
+    tracker.stat(
         false_conditional_entropy=false_ce_tensor,
+        denominator="false_conditional_entropy_nonzero_prompts",
+    )
+    tracker.stat(
         conditional_entropy_success_rate=success_rate_tensor,
         denominator="conditional_entropy_n_prompts",
     )
