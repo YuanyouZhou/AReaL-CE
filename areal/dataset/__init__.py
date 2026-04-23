@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 VALID_DATASETS = [
     "gsm8k",
+    "hendrycks_math",
     "clevr_count_70k",
     "geometry3k",
     "virl39k",
@@ -45,6 +46,26 @@ def _get_custom_dataset(
         from .gsm8k import get_gsm8k_rl_dataset
 
         return get_gsm8k_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "hendrycks_math" in path and type == "sft":
+        from .hendrycks_math import get_hendrycks_math_sft_dataset
+
+        return get_hendrycks_math_sft_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "hendrycks_math" in path and type == "rl":
+        from .hendrycks_math import get_hendrycks_math_rl_dataset
+
+        return get_hendrycks_math_rl_dataset(
             path=path,
             split=split,
             tokenizer=tokenizer,
@@ -175,6 +196,8 @@ def get_custom_dataset(
         )
 
     if dataset_config is not None:
+        dataset_kwargs = dict(getattr(dataset_config, "dataset_kwargs", {}))
+        dataset_kwargs.update(kwargs)
         return _get_custom_dataset(
             path=dataset_config.path,
             type=dataset_config.type,
@@ -182,7 +205,7 @@ def get_custom_dataset(
             max_length=dataset_config.max_length,
             tokenizer=tokenizer,
             processor=processor,
-            **kwargs,
+            **dataset_kwargs,
         )
 
     logger.warning("dataset_config is not provided")

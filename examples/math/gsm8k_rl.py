@@ -6,6 +6,12 @@ from areal.dataset import get_custom_dataset
 from areal.utils.hf_utils import load_hf_tokenizer
 
 
+def _get_reward_fn(dataset_path: str) -> str:
+    if "hendrycks_math" in dataset_path:
+        return "areal.reward.hendrycks_math.hendrycks_math_reward_fn"
+    return "areal.reward.gsm8k.gsm8k_reward_fn"
+
+
 def main(args):
     config, _ = load_expr_config(args, GRPOConfig)
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
@@ -22,7 +28,7 @@ def main(args):
     )
 
     workflow_kwargs = dict(
-        reward_fn="areal.reward.gsm8k.gsm8k_reward_fn",
+        reward_fn=_get_reward_fn(config.train_dataset.path),
         gconfig=config.gconfig,
         tokenizer=config.tokenizer_path,
         enable_thinking=False,
