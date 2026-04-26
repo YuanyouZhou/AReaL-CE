@@ -1230,6 +1230,25 @@ class PPOActorConfig(TrainEngineConfig):
 
     # KL Control
     kl_ctl: float = field(default=0.1, metadata={"help": "KL divergence coefficient"})
+    tckl_ctl: float = field(
+        default=0.0,
+        metadata={
+            "help": "KL divergence coefficient for true conditional distributions"
+        },
+    )
+    fckl_ctl: float = field(
+        default=0.0,
+        metadata={
+            "help": "KL divergence coefficient for false conditional distributions"
+        },
+    )
+    ckl_ctl: float = field(
+        default=0.0,
+        metadata={
+            "help": "KL divergence coefficient for both true and false conditional "
+            "distributions. When positive, overrides tckl_ctl and fckl_ctl."
+        },
+    )
     kl_estimator: str = field(
         default="k1",
         metadata={"help": "KL divergence estimator", "choices": ["k1", "k2", "k3"]},
@@ -1340,6 +1359,11 @@ class PPOActorConfig(TrainEngineConfig):
 
     def __post_init__(self):
         """Validate PPO actor configuration."""
+        for name in ["kl_ctl", "tckl_ctl", "fckl_ctl", "ckl_ctl"]:
+            value = getattr(self, name)
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative, got {value}.")
+
         # Validate MIS/TIS configuration
         if self.behave_imp_weight_mode == "disabled":
             if self.behave_imp_weight_cap is not None:

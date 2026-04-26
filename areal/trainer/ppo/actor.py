@@ -48,6 +48,12 @@ class PPOActor:
         self.reward_clip = config.reward_clip
 
         self.kl_ctl = config.kl_ctl
+        if config.ckl_ctl > 0:
+            self.tckl_ctl = config.ckl_ctl
+            self.fckl_ctl = config.ckl_ctl
+        else:
+            self.tckl_ctl = config.tckl_ctl
+            self.fckl_ctl = config.fckl_ctl
         self.kl_estimator = KLEstimator(config.kl_estimator)
 
         self.adv_norm = Normalization(config.adv_norm) if config.adv_norm else None
@@ -119,6 +125,9 @@ class PPOActor:
             f"  reward_norm: {config.reward_norm if config.reward_norm else 'DISABLED (None)'}"
         )
         logger.info(f"  eps_clip: {config.eps_clip}")
+        logger.info(f"  kl_ctl: {config.kl_ctl}")
+        logger.info(f"  tckl_ctl: {self.tckl_ctl}")
+        logger.info(f"  fckl_ctl: {self.fckl_ctl}")
         logger.info("=" * 70)
 
     @trace_perf("ppo_actor.compute_logp", category="compute")
@@ -158,8 +167,10 @@ class PPOActor:
                 max_response_length=self.config.max_new_tokens,
             )
 
+        raw_reward_score = data["rewards"]
+
         # Reward Scaling
-        reward_score = data["rewards"]
+        reward_score = raw_reward_score
         reward_score = (reward_score + self.reward_bias) * self.reward_scaling
         reward_score = torch.clip(
             reward_score, max=self.reward_clip, min=-self.reward_clip
@@ -194,7 +205,14 @@ class PPOActor:
         attn_mask = data["attention_mask"]
         seqlens = attn_mask.sum(-1).long()
         seq_no_eos_mask = seqlens == attn_mask.shape[1]
-        rewards = -self.kl_ctl * self.kl_estimator(old_logp, ref_logp)
+        kl_penalty = self.kl_ctl * self.kl_estimator(old_logp, ref_logp)
+        kl_penalty += self._compute_conditional_kl_penalty(
+            old_logp=old_logp,
+            ref_logp=ref_logp,
+            loss_mask=loss_mask,
+            rewards=raw_reward_score,
+        )
+        rewards = -kl_penalty
         kl_rewards = rewards.clone()
         # KL rewards at the next token after eos is zero.
         rewards[batch_indices, seqlens - 1] = 0
@@ -242,6 +260,57 @@ class PPOActor:
         data["logprobs"] = old_logp
 
         return data
+
+    def _compute_conditional_kl_penalty(
+        self,
+        old_logp: torch.Tensor,
+        ref_logp: torch.Tensor,
+        loss_mask: torch.Tensor,
+        rewards: torch.Tensor,
+    ) -> torch.Tensor:
+        """Estimate KL(pi(.|reward)||ref(.|reward)) from actor samples.
+
+        For a reward class y, if r(x)=log pi(x)-log ref(x), then
+        log pi(x|y)-log ref(x|y) = r(x) + log E_{pi(.|y)}[exp(-r(x))].
+        The sequence-level estimate is spread uniformly over valid response tokens
+        so it can be used by the existing token reward-shaping path.
+        """
+
+        conditional_penalty = torch.zeros_like(old_logp)
+        if self.tckl_ctl == 0 and self.fckl_ctl == 0:
+            return conditional_penalty
+
+        seq_log_ratio = ((old_logp - ref_logp).float() * loss_mask).sum(dim=-1)
+        response_lens = loss_mask.sum(dim=-1).clamp(min=1)
+
+        for ctl, reward_mask in [
+            (self.tckl_ctl, rewards > 0),
+            (self.fckl_ctl, rewards <= 0),
+        ]:
+            if ctl == 0 or not reward_mask.any():
+                continue
+
+            group_log_ratio = seq_log_ratio[reward_mask]
+            log_ref_mass_over_pi_mass = torch.logsumexp(
+                -group_log_ratio, dim=0
+            ) - torch.log(
+                torch.tensor(
+                    group_log_ratio.numel(),
+                    dtype=group_log_ratio.dtype,
+                    device=group_log_ratio.device,
+                )
+            )
+            conditional_log_ratio = (
+                group_log_ratio + log_ref_mass_over_pi_mass
+            ).unsqueeze(-1)
+            zeros = torch.zeros_like(conditional_log_ratio)
+            seq_kl = self.kl_estimator(conditional_log_ratio, zeros).squeeze(-1)
+            token_penalty = ctl * seq_kl.unsqueeze(-1) / response_lens[
+                reward_mask
+            ].unsqueeze(-1)
+            conditional_penalty[reward_mask] = token_penalty * loss_mask[reward_mask]
+
+        return conditional_penalty
 
     @trace_perf("ppo_actor.ppo_update", category="compute")
     @stats_tracker.scope_func_wrapper("ppo_actor")
