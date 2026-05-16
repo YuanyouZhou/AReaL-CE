@@ -1199,10 +1199,16 @@ class PPOActorConfig(TrainEngineConfig):
     reward_clip: float = field(
         default=20.0, metadata={"help": "Maximum absolute value for reward clipping"}
     )
-    reward_random: bool = field(
-        default=False,
+    special_reward: str | None = field(
+        default=None,
         metadata={
-            "help": "Randomly replace each sequence reward with either 1 or -1 before reward processing."
+            "help": (
+                "Override actor advantages for special experiments. None uses "
+                "standard RL advantages; 'positive' uses all-ones advantages; "
+                "'negative' uses all-negative-ones advantages; 'random' samples "
+                "one 1 or -1 advantage sign per sequence."
+            ),
+            "choices": [None, "positive", "negative", "random"],
         },
     )
     overlong_reward_penalty: bool = field(
@@ -1366,6 +1372,13 @@ class PPOActorConfig(TrainEngineConfig):
 
     def __post_init__(self):
         """Validate PPO actor configuration."""
+        valid_special_rewards = {None, "positive", "negative", "random"}
+        if self.special_reward not in valid_special_rewards:
+            raise ValueError(
+                "special_reward must be one of None, 'positive', 'negative', "
+                f"or 'random', got {self.special_reward}."
+            )
+
         for name in ["kl_ctl", "tckl_ctl", "fckl_ctl", "ckl_ctl"]:
             value = getattr(self, name)
             if value < 0:

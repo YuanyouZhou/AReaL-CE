@@ -46,7 +46,7 @@ class PPOActor:
         self.reward_bias = config.reward_bias
         self.reward_scaling = config.reward_scaling
         self.reward_clip = config.reward_clip
-        self.reward_random = config.reward_random
+        self.special_reward = config.special_reward
 
         self.kl_ctl = config.kl_ctl
         if config.ckl_ctl > 0:
@@ -125,7 +125,7 @@ class PPOActor:
         logger.info(
             f"  reward_norm: {config.reward_norm if config.reward_norm else 'DISABLED (None)'}"
         )
-        logger.info(f"  reward_random: {config.reward_random}")
+        logger.info(f"  special_reward: {config.special_reward}")
         logger.info(f"  eps_clip: {config.eps_clip}")
         logger.info(f"  kl_ctl: {config.kl_ctl}")
         logger.info(f"  tckl_ctl: {self.tckl_ctl}")
@@ -169,8 +169,8 @@ class PPOActor:
                 max_response_length=self.config.max_new_tokens,
             )
 
-        if self.reward_random:
-            data["rewards"] = self._sample_random_rewards(data["rewards"])
+        if self.special_reward is not None:
+            data["rewards"] = self._build_special_reward_score(data["rewards"])
         raw_reward_score = data["rewards"]
 
         # Reward Scaling
@@ -255,6 +255,10 @@ class PPOActor:
         if self.adv_norm is not None:
             advantages = self.adv_norm(advantages, loss_mask)
 
+        if self.special_reward is not None:
+            advantages = raw_reward_score.unsqueeze(-1) * loss_mask
+            data["returns"] = advantages + values
+
         # Store data in the dict.
         data["advantages"] = advantages
         data["kl_rewards"] = kl_rewards
@@ -265,9 +269,21 @@ class PPOActor:
 
         return data
 
-    def _sample_random_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
+    def _build_special_reward_score(self, rewards: torch.Tensor) -> torch.Tensor:
+        if self.special_reward == "positive":
+            return torch.ones_like(rewards)
+        elif self.special_reward == "negative":
+            return -torch.ones_like(rewards)
+        elif self.special_reward == "random":
+            return self._sample_random_reward_signs(rewards)
+        else:
+            raise ValueError(f"Unsupported special_reward: {self.special_reward}")
+
+    def _sample_random_reward_signs(self, rewards: torch.Tensor) -> torch.Tensor:
         reward_signs = torch.randint(0, 2, rewards.shape, device=rewards.device).bool()
-        return torch.where(reward_signs, torch.ones_like(rewards), -torch.ones_like(rewards))
+        return torch.where(
+            reward_signs, torch.ones_like(rewards), -torch.ones_like(rewards)
+        )
 
     def _compute_conditional_kl_penalty(
         self,
