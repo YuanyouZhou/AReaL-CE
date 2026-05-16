@@ -13,6 +13,7 @@ from hydra import compose as hydra_compose
 from hydra import initialize as hydra_init
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import MISSING, DictConfig, OmegaConf
+from omegaconf.errors import ConfigAttributeError
 
 from areal.engine.fsdp_utils.attn_impl import (
     BUILTIN_ATTN_IMPLS,
@@ -1197,6 +1198,12 @@ class PPOActorConfig(TrainEngineConfig):
     reward_bias: float = field(default=0.0, metadata={"help": "Reward bias"})
     reward_clip: float = field(
         default=20.0, metadata={"help": "Maximum absolute value for reward clipping"}
+    )
+    reward_random: bool = field(
+        default=False,
+        metadata={
+            "help": "Randomly replace each sequence reward with either 1 or -1 before reward processing."
+        },
     )
     overlong_reward_penalty: bool = field(
         default=False,
@@ -2511,7 +2518,7 @@ class GRPOConfig(PPOConfig):
     pass
 
 
-def parse_cli_args(argv: list[str]):
+def parse_cli_args(argv: list[str], apply_overrides: bool = True):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", help="Path to the main configuration file", required=True
@@ -2531,9 +2538,11 @@ def parse_cli_args(argv: list[str]):
     hydra_init(config_path=str(relpath.parent), job_name="app", version_base=None)
     cfg = hydra_compose(
         config_name=str(relpath.name).split(".yaml")[0],
-        overrides=overrides,
+        overrides=overrides if apply_overrides else [],
     )
-    return cfg, config_file
+    if apply_overrides:
+        return cfg, config_file
+    return cfg, config_file, overrides
 
 
 def to_structured_cfg(cfg, config_cls):
@@ -2545,8 +2554,14 @@ def to_structured_cfg(cfg, config_cls):
 
 
 def load_expr_config(argv: list[str], config_cls: type[ConfigT]) -> tuple[ConfigT, str]:
-    cfg, config_file = parse_cli_args(argv)
+    try:
+        cfg, config_file = parse_cli_args(argv)
+        overrides = []
+    except ConfigAttributeError:
+        cfg, config_file, overrides = parse_cli_args(argv, apply_overrides=False)
     cfg = to_structured_cfg(cfg, config_cls=config_cls)
+    if overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     cfg = OmegaConf.to_object(cfg)
     assert isinstance(cfg, config_cls)
 

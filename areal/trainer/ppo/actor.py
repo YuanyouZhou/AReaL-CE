@@ -46,6 +46,7 @@ class PPOActor:
         self.reward_bias = config.reward_bias
         self.reward_scaling = config.reward_scaling
         self.reward_clip = config.reward_clip
+        self.reward_random = config.reward_random
 
         self.kl_ctl = config.kl_ctl
         if config.ckl_ctl > 0:
@@ -124,6 +125,7 @@ class PPOActor:
         logger.info(
             f"  reward_norm: {config.reward_norm if config.reward_norm else 'DISABLED (None)'}"
         )
+        logger.info(f"  reward_random: {config.reward_random}")
         logger.info(f"  eps_clip: {config.eps_clip}")
         logger.info(f"  kl_ctl: {config.kl_ctl}")
         logger.info(f"  tckl_ctl: {self.tckl_ctl}")
@@ -167,6 +169,8 @@ class PPOActor:
                 max_response_length=self.config.max_new_tokens,
             )
 
+        if self.reward_random:
+            data["rewards"] = self._sample_random_rewards(data["rewards"])
         raw_reward_score = data["rewards"]
 
         # Reward Scaling
@@ -260,6 +264,10 @@ class PPOActor:
         data["logprobs"] = old_logp
 
         return data
+
+    def _sample_random_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
+        reward_signs = torch.randint(0, 2, rewards.shape, device=rewards.device).bool()
+        return torch.where(reward_signs, torch.ones_like(rewards), -torch.ones_like(rewards))
 
     def _compute_conditional_kl_penalty(
         self,
