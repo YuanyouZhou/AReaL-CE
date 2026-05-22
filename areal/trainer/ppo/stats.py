@@ -185,11 +185,11 @@ def log_conditional_entropy_stats(
     )
     tracker.stat(
         true_conditional_entropy=true_ce_tensor,
-        denominator="true_conditional_entropy_nonzero_prompts",
+        denominator="conditional_entropy_n_prompts",
     )
     tracker.stat(
         false_conditional_entropy=false_ce_tensor,
-        denominator="false_conditional_entropy_nonzero_prompts",
+        denominator="conditional_entropy_n_prompts",
     )
     tracker.stat(
         conditional_entropy_success_rate=success_rate_tensor,
