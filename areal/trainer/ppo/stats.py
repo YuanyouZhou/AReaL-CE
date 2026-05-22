@@ -195,3 +195,58 @@ def log_conditional_entropy_stats(
         conditional_entropy_success_rate=success_rate_tensor,
         denominator="conditional_entropy_n_prompts",
     )
+
+
+def log_prompt_advantage_variance_stats(
+    trajectory_groups: list[dict[str, Any]],
+    tracker: stats_tracker.DistributedStatsTracker | None = None,
+) -> None:
+    """Log mean per-prompt variance of response-level advantages.
+
+    Each item in ``trajectory_groups`` should correspond to one prompt. The
+    batch dimension contains sampled responses for that prompt, so the metric
+    first reduces token advantages to one scalar per response, then computes
+    the variance within each prompt group.
+    """
+    if tracker is None:
+        tracker = stats_tracker.DEFAULT_TRACKER
+
+    prompt_variances = []
+    devices = []
+
+    for data in trajectory_groups:
+        advantages = data.get("advantages")
+        loss_mask = data.get("loss_mask")
+        if not (isinstance(advantages, torch.Tensor) and advantages.numel() > 0):
+            continue
+
+        devices.append(advantages.device)
+        advantages = advantages.float()
+        if advantages.ndim == 1:
+            response_advantages = advantages
+        elif isinstance(loss_mask, torch.Tensor) and loss_mask.shape == advantages.shape:
+            mask = loss_mask.float()
+            reduce_dims = tuple(range(1, advantages.ndim))
+            response_advantages = (advantages * mask).sum(dim=reduce_dims) / mask.sum(
+                dim=reduce_dims
+            ).clamp_min(1.0)
+        else:
+            reduce_dims = tuple(range(1, advantages.ndim))
+            response_advantages = advantages.mean(dim=reduce_dims)
+
+        prompt_variances.append(response_advantages.var(unbiased=False))
+
+    if not prompt_variances:
+        return
+
+    device = devices[0]
+    prompt_variance_tensor = torch.stack(
+        [x.to(device) for x in prompt_variances]
+    ).float()
+    prompt_denominator = torch.ones_like(prompt_variance_tensor, dtype=torch.bool)
+
+    tracker.denominator(advantage_variance_n_prompts=prompt_denominator)
+    tracker.stat(
+        prompt_advantage_variance=prompt_variance_tensor,
+        denominator="advantage_variance_n_prompts",
+    )

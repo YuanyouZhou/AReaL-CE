@@ -9,6 +9,7 @@ from areal.infra import TrainController
 from areal.trainer.ppo.stats import (
     infer_token_denominator,
     log_conditional_entropy_stats,
+    log_prompt_advantage_variance_stats,
     sequence_entropy_stat,
 )
 from areal.utils import logging, stats_tracker
@@ -340,6 +341,7 @@ class PPOActor:
     @stats_tracker.scope_func_wrapper("ppo_actor")
     def ppo_update(self, data: list[dict[str, Any]]) -> None:
         log_conditional_entropy_stats(data)
+        log_prompt_advantage_variance_stats(data)
         batched_call(self._ppo_update, data, unpack=False)
 
     def _ppo_update(self, data: dict[str, Any]) -> None:
