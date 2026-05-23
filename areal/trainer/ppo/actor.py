@@ -277,6 +277,8 @@ class PPOActor:
             return -torch.ones_like(rewards)
         elif self.special_reward == "random":
             return self._sample_random_reward_signs(rewards)
+        elif self.special_reward == "shuffle":
+            return self._shuffle_reward_scores(rewards)
         else:
             raise ValueError(f"Unsupported special_reward: {self.special_reward}")
 
@@ -285,6 +287,10 @@ class PPOActor:
         return torch.where(
             reward_signs, torch.ones_like(rewards), -torch.ones_like(rewards)
         )
+
+    def _shuffle_reward_scores(self, rewards: torch.Tensor) -> torch.Tensor:
+        shuffle_indices = torch.randperm(rewards.shape[0], device=rewards.device)
+        return rewards[shuffle_indices]
 
     def _compute_conditional_kl_penalty(
         self,
