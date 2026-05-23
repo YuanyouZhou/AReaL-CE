@@ -1095,6 +1095,7 @@ class MegatronEngine(TrainEngine):
             adam_beta1=self.optimizer_config.beta1,
             adam_beta2=self.optimizer_config.beta2,
             adam_eps=self.optimizer_config.eps,
+            sgd_momentum=0.0,
             use_distributed_optimizer=use_distributed_optimizer,
             params_dtype=self.dtype,
             clip_grad=self.optimizer_config.gradient_clipping,

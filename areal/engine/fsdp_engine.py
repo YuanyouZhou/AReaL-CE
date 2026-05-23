@@ -989,6 +989,7 @@ class FSDPEngine(TrainEngine):
                 self.model.parameters(),
                 lr=lr,
                 weight_decay=weight_decay,
+                momentum=0.0,
             )
         total_train_steps = ft_spec.total_train_steps
         num_warmup_steps = int(

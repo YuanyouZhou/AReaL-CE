@@ -63,6 +63,7 @@ def create_optimizer(
             params,
             lr=lr,
             weight_decay=weight_decay,
+            momentum=0.0,
         )
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_config.type}")
