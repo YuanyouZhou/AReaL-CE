@@ -1,17 +1,22 @@
 # Standalone Math Evaluation
 
-`math_sglang_eval.py` evaluates a local or Hugging Face checkpoint through an
-auto-launched SGLang server. It is independent from AReaL training code, but reuses
-the repository virtual environment.
+`eval.py` evaluates a local or Hugging Face checkpoint through an auto-launched SGLang
+server. It is independent from AReaL training code, but reuses the repository virtual
+environment.
 
 Example:
 
 ```bash
-uv run python eval/math_sglang_eval.py Qwen/Qwen2.5-Math-7B \
+uv run python eval/eval.py Qwen/Qwen2.5-Math-7B \
   -ds EleutherAI/hendrycks_math HuggingFaceH4/MATH-500 \
   -N 8 \
-  --parallel 256
+  --parallel 64
 ```
+
+By default, `-N` samples are split into one completion per HTTP request
+(`--samples-per-request 1`). This is more stable for SGLang under heavy load than
+asking one Chat Completions request to return many long generations. You can raise
+`--samples-per-request` after confirming the server is stable.
 
 Outputs are written under `eval/runs/<timestamp>/`:
 

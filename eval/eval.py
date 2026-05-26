@@ -28,7 +28,7 @@ from typing import Any, Literal
 import httpx
 from datasets import concatenate_datasets, load_dataset
 from math_verify import parse, verify
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from tqdm.asyncio import tqdm
 from transformers import AutoTokenizer
 
@@ -100,7 +100,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0, help="0 selects a free port.")
     parser.add_argument("--max-tokens", type=int, default=4096)
-    parser.add_argument("--parallel", type=int, default=256)
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=64,
+        help="Maximum number of concurrent prompt requests sent to SGLang.",
+    )
+    parser.add_argument(
+        "--samples-per-request",
+        type=int,
+        default=1,
+        help=(
+            "How many completions to request with one OpenAI call. Keep the default "
+            "1 for SGLang stability; increase only after checking server capacity."
+        ),
+    )
+    parser.add_argument("--request-timeout", type=float, default=600.0)
+    parser.add_argument("--request-retries", type=int, default=5)
+    parser.add_argument("--retry-base-delay", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "runs"))
     parser.add_argument("--server-log", default=None)
@@ -117,6 +134,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("-N must be a positive integer.")
     if args.parallel <= 0:
         parser.error("--parallel must be a positive integer.")
+    if args.samples_per_request <= 0:
+        parser.error("--samples-per-request must be a positive integer.")
+    if args.request_timeout <= 0:
+        parser.error("--request-timeout must be positive.")
+    if args.request_retries < 0:
+        parser.error("--request-retries must be non-negative.")
+    if args.retry_base_delay <= 0:
+        parser.error("--retry-base-delay must be positive.")
     if args.max_tokens <= 0:
         parser.error("--max-tokens must be a positive integer.")
     return args
@@ -353,24 +378,70 @@ async def generate_one_prompt(
     sample: EvalSample,
     n_samples: int,
     max_tokens: int,
-    tokenizer,
+    args: argparse.Namespace,
+    server_proc: subprocess.Popen,
+    log_path: Path,
 ) -> list[str]:
-    response = await client.chat.completions.create(
-        model="default",
-        messages=[{"role": "user", "content": sample.prompt}],
-        temperature=1.0,
-        n=n_samples,
-        max_tokens=max_tokens,
-    )
     outputs: list[str] = []
-    for choice in response.choices:
-        content = choice.message.content
-        outputs.append(content if content is not None else "")
-    if len(outputs) != n_samples:
-        raise RuntimeError(
-            f"Expected {n_samples} generations for {sample.sample_id}, got {len(outputs)}."
+    remaining = n_samples
+    while remaining > 0:
+        chunk_size = min(remaining, args.samples_per_request)
+        outputs.extend(
+            await generate_completion_chunk(
+                client=client,
+                sample=sample,
+                n_samples=chunk_size,
+                max_tokens=max_tokens,
+                args=args,
+                server_proc=server_proc,
+                log_path=log_path,
+            )
         )
+        remaining -= chunk_size
     return outputs
+
+
+async def generate_completion_chunk(
+    client: AsyncOpenAI,
+    sample: EvalSample,
+    n_samples: int,
+    max_tokens: int,
+    args: argparse.Namespace,
+    server_proc: subprocess.Popen,
+    log_path: Path,
+) -> list[str]:
+    for attempt in range(args.request_retries + 1):
+        if server_proc.poll() is not None:
+            raise RuntimeError(
+                "SGLang server exited while evaluating "
+                f"{sample.sample_id} with code {server_proc.returncode}. "
+                f"Check server log: {log_path}"
+            )
+        try:
+            response = await client.chat.completions.create(
+                model="default",
+                messages=[{"role": "user", "content": sample.prompt}],
+                temperature=1.0,
+                n=n_samples,
+                max_tokens=max_tokens,
+                timeout=args.request_timeout,
+            )
+            outputs: list[str] = []
+            for choice in response.choices:
+                content = choice.message.content
+                outputs.append(content if content is not None else "")
+            if len(outputs) != n_samples:
+                raise RuntimeError(
+                    f"Expected {n_samples} generations for {sample.sample_id}, "
+                    f"got {len(outputs)}."
+                )
+            return outputs
+        except (APIConnectionError, APITimeoutError, APIStatusError, httpx.HTTPError):
+            if attempt >= args.request_retries:
+                raise
+            delay = args.retry_base_delay * (2**attempt)
+            await asyncio.sleep(delay)
+    raise RuntimeError(f"Failed to generate completions for {sample.sample_id}.")
 
 
 async def evaluate_dataset(
@@ -379,6 +450,8 @@ async def evaluate_dataset(
     samples: list[EvalSample],
     args: argparse.Namespace,
     tokenizer,
+    server_proc: subprocess.Popen,
+    log_path: Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     semaphore = asyncio.Semaphore(args.parallel)
     judge = dataset_judge(dataset_name)
@@ -390,7 +463,9 @@ async def evaluate_dataset(
                 sample=sample,
                 n_samples=args.N,
                 max_tokens=args.max_tokens,
-                tokenizer=tokenizer,
+                args=args,
+                server_proc=server_proc,
+                log_path=log_path,
             )
         generations = [
             Generation(
@@ -531,6 +606,8 @@ async def amain() -> None:
                 samples=samples,
                 args=args,
                 tokenizer=tokenizer,
+                server_proc=proc,
+                log_path=log_path,
             )
             dataset_metrics[dataset_name] = metrics
             records_by_dataset[dataset_name] = records
@@ -543,6 +620,9 @@ async def amain() -> None:
             "sampling": "standard probability sampling; no top_p/top_k/min_p/penalty overrides",
             "max_tokens": args.max_tokens,
             "parallel": args.parallel,
+            "samples_per_request": args.samples_per_request,
+            "request_timeout": args.request_timeout,
+            "request_retries": args.request_retries,
             "gpu_count": gpu_count,
             "sglang_base_url": base_url,
             "sglang_command": cmd,
