@@ -25,5 +25,17 @@ Outputs are written under `eval/runs/<timestamp>/`:
 - `samples.jsonl`: one JSON record per prompt, including raw dataset row, all sampled
   responses, correctness, and per-prompt metrics.
 
+`sequence_entropy` is estimated from returned token logprobs as mean sequence negative
+log-likelihood in nats. `sequence_diversity_entropy` is the older empirical entropy of
+normalized response strings; it often saturates at `log(N)` when every sampled response
+is unique, so it should only be used as a diversity diagnostic.
+
+Conditional entropy is computed per prompt as
+`H(Y|x,C) = -(1/P(C|x)) * E[1_C log p(Y|x)] + log P(C|x)`, where `C` is
+correctness or incorrectness and `P(C|x)` is estimated by the sample fraction for that
+prompt. The JSON output includes the uncorrected indicator NLL mean, the
+`1/P(C|x)`-corrected NLL term, `log_normalizer`, and estimated condition probability
+used for each conditional entropy value.
+
 The script uses `temperature=1.0` and does not set top-p, top-k, min-p, penalties, or
 other sampling modifiers.

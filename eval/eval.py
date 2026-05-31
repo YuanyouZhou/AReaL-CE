@@ -72,7 +72,21 @@ class EvalSample:
 class Generation:
     text: str
     token_count: int
+    sequence_logprob: float | None
+    sequence_nll: float | None
     correct: bool
+
+
+@dataclass
+class ConditionalEntropy:
+    entropy: float
+    sample_count: int
+    condition_probability: float
+    mean_nll: float
+    unconditional_indicator_nll_mean: float
+    condition_corrected_mean_nll: float
+    inverse_condition_probability: float
+    log_normalizer: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,6 +132,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-timeout", type=float, default=600.0)
     parser.add_argument("--request-retries", type=int, default=5)
     parser.add_argument("--retry-base-delay", type=float, default=2.0)
+    parser.add_argument(
+        "--logprobs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Request token logprobs and compute model sequence entropy from them.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "runs"))
     parser.add_argument("--server-log", default=None)
@@ -381,8 +401,8 @@ async def generate_one_prompt(
     args: argparse.Namespace,
     server_proc: subprocess.Popen,
     log_path: Path,
-) -> list[str]:
-    outputs: list[str] = []
+) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
     remaining = n_samples
     while remaining > 0:
         chunk_size = min(remaining, args.samples_per_request)
@@ -409,7 +429,7 @@ async def generate_completion_chunk(
     args: argparse.Namespace,
     server_proc: subprocess.Popen,
     log_path: Path,
-) -> list[str]:
+) -> list[dict[str, Any]]:
     for attempt in range(args.request_retries + 1):
         if server_proc.poll() is not None:
             raise RuntimeError(
@@ -424,12 +444,25 @@ async def generate_completion_chunk(
                 temperature=1.0,
                 n=n_samples,
                 max_tokens=max_tokens,
+                logprobs=args.logprobs,
                 timeout=args.request_timeout,
             )
-            outputs: list[str] = []
+            outputs: list[dict[str, Any]] = []
             for choice in response.choices:
                 content = choice.message.content
-                outputs.append(content if content is not None else "")
+                text = content if content is not None else ""
+                sequence_logprob = extract_sequence_logprob(choice)
+                outputs.append(
+                    {
+                        "text": text,
+                        "sequence_logprob": sequence_logprob,
+                        "sequence_nll": (
+                            -sequence_logprob
+                            if sequence_logprob is not None
+                            else None
+                        ),
+                    }
+                )
             if len(outputs) != n_samples:
                 raise RuntimeError(
                     f"Expected {n_samples} generations for {sample.sample_id}, "
@@ -442,6 +475,48 @@ async def generate_completion_chunk(
             delay = args.retry_base_delay * (2**attempt)
             await asyncio.sleep(delay)
     raise RuntimeError(f"Failed to generate completions for {sample.sample_id}.")
+
+
+def extract_sequence_logprob(choice: Any) -> float | None:
+    """Return sum of output token logprobs from an OpenAI-compatible choice."""
+    logprobs = getattr(choice, "logprobs", None)
+    if logprobs is None:
+        return None
+
+    token_logprobs: list[float] = []
+    content = getattr(logprobs, "content", None)
+    if content is not None:
+        for item in content:
+            logprob = getattr(item, "logprob", None)
+            if logprob is not None:
+                token_logprobs.append(float(logprob))
+
+    if not token_logprobs and hasattr(logprobs, "model_dump"):
+        token_logprobs.extend(extract_logprobs_from_dump(logprobs.model_dump()))
+
+    if not token_logprobs:
+        return None
+    return float(sum(token_logprobs))
+
+
+def extract_logprobs_from_dump(logprobs: dict[str, Any]) -> list[float]:
+    content = logprobs.get("content")
+    if isinstance(content, list):
+        return [
+            float(item["logprob"])
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("logprob"), int | float)
+        ]
+
+    token_logprobs = logprobs.get("token_logprobs")
+    if isinstance(token_logprobs, list):
+        return [
+            float(logprob)
+            for logprob in token_logprobs
+            if isinstance(logprob, int | float)
+        ]
+
+    return []
 
 
 async def evaluate_dataset(
@@ -458,7 +533,7 @@ async def evaluate_dataset(
 
     async def evaluate_sample(sample: EvalSample) -> dict[str, Any]:
         async with semaphore:
-            texts = await generate_one_prompt(
+            outputs = await generate_one_prompt(
                 client=client,
                 sample=sample,
                 n_samples=args.N,
@@ -469,23 +544,18 @@ async def evaluate_dataset(
             )
         generations = [
             Generation(
-                text=text,
-                token_count=token_count(tokenizer, text),
-                correct=judge(text, sample.answer),
+                text=output["text"],
+                token_count=token_count(tokenizer, output["text"]),
+                sequence_logprob=output["sequence_logprob"],
+                sequence_nll=output["sequence_nll"],
+                correct=judge(output["text"], sample.answer),
             )
-            for text in texts
+            for output in outputs
         ]
         correctness = [generation.correct for generation in generations]
-        correct_texts = [
-            normalize_sequence(generation.text)
-            for generation in generations
-            if generation.correct
-        ]
-        wrong_texts = [
-            normalize_sequence(generation.text)
-            for generation in generations
-            if not generation.correct
-        ]
+        prompt_entropy = sequence_entropy(generations)
+        correct_entropy = conditional_sequence_entropy(generations, condition=True)
+        wrong_entropy = conditional_sequence_entropy(generations, condition=False)
         return {
             "sample_id": sample.sample_id,
             "prompt": sample.prompt,
@@ -493,11 +563,14 @@ async def evaluate_dataset(
             "raw": sample.raw,
             "generations": [asdict(generation) for generation in generations],
             "pass_at_k": pass_at_k(correctness, args.N),
-            "sequence_entropy": empirical_entropy(
+            "sequence_entropy": prompt_entropy,
+            "sequence_diversity_entropy": empirical_entropy(
                 [normalize_sequence(generation.text) for generation in generations]
             ),
-            "correct_conditional_entropy": empirical_entropy(correct_texts),
-            "wrong_conditional_entropy": empirical_entropy(wrong_texts),
+            "correct_conditional_entropy": correct_entropy.entropy,
+            "wrong_conditional_entropy": wrong_entropy.entropy,
+            "correct_conditional_entropy_detail": asdict(correct_entropy),
+            "wrong_conditional_entropy_detail": asdict(wrong_entropy),
         }
 
     tasks = [evaluate_sample(sample) for sample in samples]
@@ -508,6 +581,69 @@ async def evaluate_dataset(
 
 def normalize_sequence(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def sequence_entropy(generations: list[Generation]) -> float:
+    nlls = [
+        generation.sequence_nll
+        for generation in generations
+        if generation.sequence_nll is not None
+    ]
+    if len(nlls) != len(generations):
+        raise RuntimeError(
+            "SGLang did not return token logprobs for every generation, so model "
+            "sequence entropy cannot be computed. Keep --logprobs enabled and "
+            "check whether this SGLang/OpenAI endpoint supports chat logprobs."
+        )
+    return mean([float(nll) for nll in nlls])
+
+
+def conditional_sequence_entropy(
+    generations: list[Generation],
+    condition: bool,
+) -> ConditionalEntropy:
+    selected = [
+        generation
+        for generation in generations
+        if generation.correct is condition and generation.sequence_nll is not None
+    ]
+    if len(selected) < 2:
+        return ConditionalEntropy(
+            entropy=0.0,
+            sample_count=len(selected),
+            condition_probability=len(selected) / len(generations),
+            mean_nll=0.0,
+            unconditional_indicator_nll_mean=0.0,
+            condition_corrected_mean_nll=0.0,
+            inverse_condition_probability=0.0,
+            log_normalizer=0.0,
+        )
+
+    condition_prob = len(selected) / len(generations)
+    mean_nll = mean([float(generation.sequence_nll) for generation in selected])
+    unconditional_indicator_nll_mean = (
+        sum(float(generation.sequence_nll) for generation in selected)
+        / len(generations)
+    )
+    inverse_condition_probability = 1.0 / condition_prob
+    condition_corrected_mean_nll = (
+        unconditional_indicator_nll_mean * inverse_condition_probability
+    )
+    # H(Y|x,C) = -sum_{y in C} p(y|x,C) log p(y|x,C)
+    # = -(1/P(C|x)) sum_{y in C} p(y|x) log p(y|x) + log P(C|x).
+    # The first term is estimated from all samples with the explicit
+    # 1/P(C|x) condition-probability correction.
+    log_normalizer = math.log(condition_prob)
+    return ConditionalEntropy(
+        entropy=condition_corrected_mean_nll + log_normalizer,
+        sample_count=len(selected),
+        condition_probability=condition_prob,
+        mean_nll=mean_nll,
+        unconditional_indicator_nll_mean=unconditional_indicator_nll_mean,
+        condition_corrected_mean_nll=condition_corrected_mean_nll,
+        inverse_condition_probability=inverse_condition_probability,
+        log_normalizer=log_normalizer,
+    )
 
 
 def mean(values: list[float]) -> float:
@@ -529,6 +665,12 @@ def aggregate_metrics(
         f"pass@{k}": mean([record["pass_at_k"][f"pass@{k}"] for record in records])
         for k in range(1, n_samples + 1)
     }
+    correct_entropy_details = [
+        record["correct_conditional_entropy_detail"] for record in records
+    ]
+    wrong_entropy_details = [
+        record["wrong_conditional_entropy_detail"] for record in records
+    ]
     return {
         "dataset": dataset_name,
         "num_prompts": len(records),
@@ -539,11 +681,68 @@ def aggregate_metrics(
         "sequence_entropy": mean(
             [float(record["sequence_entropy"]) for record in records]
         ),
+        "sequence_diversity_entropy": mean(
+            [float(record["sequence_diversity_entropy"]) for record in records]
+        ),
         "correct_conditional_entropy": mean(
             [float(record["correct_conditional_entropy"]) for record in records]
         ),
         "wrong_conditional_entropy": mean(
             [float(record["wrong_conditional_entropy"]) for record in records]
+        ),
+        "correct_conditional_mean_nll": mean(
+            [float(detail["mean_nll"]) for detail in correct_entropy_details]
+        ),
+        "wrong_conditional_mean_nll": mean(
+            [float(detail["mean_nll"]) for detail in wrong_entropy_details]
+        ),
+        "correct_conditional_unconditional_indicator_nll_mean": mean(
+            [
+                float(detail["unconditional_indicator_nll_mean"])
+                for detail in correct_entropy_details
+            ]
+        ),
+        "wrong_conditional_unconditional_indicator_nll_mean": mean(
+            [
+                float(detail["unconditional_indicator_nll_mean"])
+                for detail in wrong_entropy_details
+            ]
+        ),
+        "correct_condition_corrected_mean_nll": mean(
+            [
+                float(detail["condition_corrected_mean_nll"])
+                for detail in correct_entropy_details
+            ]
+        ),
+        "wrong_condition_corrected_mean_nll": mean(
+            [
+                float(detail["condition_corrected_mean_nll"])
+                for detail in wrong_entropy_details
+            ]
+        ),
+        "correct_inverse_condition_probability": mean(
+            [
+                float(detail["inverse_condition_probability"])
+                for detail in correct_entropy_details
+            ]
+        ),
+        "wrong_inverse_condition_probability": mean(
+            [
+                float(detail["inverse_condition_probability"])
+                for detail in wrong_entropy_details
+            ]
+        ),
+        "correct_conditional_log_normalizer": mean(
+            [float(detail["log_normalizer"]) for detail in correct_entropy_details]
+        ),
+        "wrong_conditional_log_normalizer": mean(
+            [float(detail["log_normalizer"]) for detail in wrong_entropy_details]
+        ),
+        "correct_condition_probability": mean(
+            [float(detail["condition_probability"]) for detail in correct_entropy_details]
+        ),
+        "wrong_condition_probability": mean(
+            [float(detail["condition_probability"]) for detail in wrong_entropy_details]
         ),
     }
 
@@ -623,15 +822,19 @@ async def amain() -> None:
             "samples_per_request": args.samples_per_request,
             "request_timeout": args.request_timeout,
             "request_retries": args.request_retries,
+            "logprobs": args.logprobs,
             "gpu_count": gpu_count,
             "sglang_base_url": base_url,
             "sglang_command": cmd,
             "sglang_log": str(log_path),
             "entropy_definition": (
-                "Empirical sequence-level entropy over complete normalized responses "
-                "per prompt, averaged over prompts. Conditional entropies use the "
-                "same estimator inside correct and wrong response subsets; subsets "
-                "with fewer than two samples contribute 0."
+                "Model sequence-level entropy is estimated as the mean sequence "
+                "negative log-likelihood E[-log p(y|x)] from SGLang token logprobs, "
+                "in nats. Conditional entropies use H(Y|x,C)=E[-log p(Y|x)|C]+log "
+                "p(C|x), with p(C|x) estimated from samples; subsets with fewer than "
+                "two samples contribute 0. sequence_diversity_entropy is only the "
+                "empirical entropy of normalized response strings and is kept as a "
+                "diagnostic diversity metric."
             ),
         }
         write_outputs(
