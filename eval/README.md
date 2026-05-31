@@ -35,7 +35,8 @@ Conditional entropy is computed per prompt as
 correctness or incorrectness and `P(C|x)` is estimated by the sample fraction for that
 prompt. The JSON output includes the uncorrected indicator NLL mean, the
 `1/P(C|x)`-corrected NLL term, `log_normalizer`, and estimated condition probability
-used for each conditional entropy value.
+used for each conditional entropy value. Conditions with one sampled response are
+still estimated; only conditions with zero sampled responses contribute `0`.
 
 The script uses `temperature=1.0` and does not set top-p, top-k, min-p, penalties, or
 other sampling modifiers.

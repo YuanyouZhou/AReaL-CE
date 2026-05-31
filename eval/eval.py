@@ -607,11 +607,11 @@ def conditional_sequence_entropy(
         for generation in generations
         if generation.correct is condition and generation.sequence_nll is not None
     ]
-    if len(selected) < 2:
+    if len(selected) == 0:
         return ConditionalEntropy(
             entropy=0.0,
-            sample_count=len(selected),
-            condition_probability=len(selected) / len(generations),
+            sample_count=0,
+            condition_probability=0.0,
             mean_nll=0.0,
             unconditional_indicator_nll_mean=0.0,
             condition_corrected_mean_nll=0.0,
